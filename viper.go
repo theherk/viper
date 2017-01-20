@@ -43,6 +43,8 @@ import (
 	"github.com/spf13/cast"
 	jww "github.com/spf13/jwalterweatherman"
 	"github.com/spf13/pflag"
+	"github.com/pkg/errors"
+	"bufio"
 )
 
 // ConfigMarshalError happens when failing to marshal the configuration.
@@ -1187,6 +1189,18 @@ func WriteConfigAs(filename string) error { return v.WriteConfigAs(filename) }
 func (v *Viper) WriteConfigAs(filename string) error {
 	return v.writeConfig(filename, true)
 }
+func WriteConfigBuffer()([]byte,error){return v.WriteConfigBuffer()}
+func (v *Viper)WriteConfigBuffer()([]byte,error){
+	jww.INFO.Println("Attempting to write configuration to buffer.")
+	configType := v.getConfigType()
+	if !stringInSlice(configType, SupportedExts) {
+		return nil,UnsupportedConfigError(configType)
+	}
+	if v.config == nil {
+		v.config = make(map[string]interface{})
+	}
+	return v.marshalBuffer(configType)
+}
 
 // SafeWriteConfigAs writes current configuration to a given filename if it does not exist.
 func SafeWriteConfigAs(filename string) error { return v.SafeWriteConfigAs(filename) }
@@ -1304,6 +1318,9 @@ func (v *Viper) marshalWriter(f afero.File, configType string) error {
 
 	case "hcl":
 		b, err := json.Marshal(c)
+		if err != nil {
+			return ConfigMarshalError{err}
+		}
 		ast, err := hcl.Parse(string(b))
 		if err != nil {
 			return ConfigMarshalError{err}
@@ -1348,6 +1365,57 @@ func (v *Viper) marshalWriter(f afero.File, configType string) error {
 		}
 	}
 	return nil
+}
+
+func (v *Viper) marshalBuffer(configType string)([]byte,error){
+	c := v.AllSettings()
+	switch configType {
+	case "json":
+		b, err := json.MarshalIndent(c, "", "  ")
+		if err != nil {
+			return nil,ConfigMarshalError{err}
+		}
+		return b,nil
+
+	case "hcl":
+		b, err := json.Marshal(c)
+		if err != nil {
+			return nil,ConfigMarshalError{err}
+		}
+		return printer.Format(b)
+
+	case "prop", "props", "properties":
+		if v.properties == nil {
+			v.properties = properties.NewProperties()
+		}
+		p := v.properties
+		for _, key := range v.AllKeys() {
+			_, _, err := p.Set(key, v.GetString(key))
+			if err != nil {
+				return nil,ConfigMarshalError{err}
+			}
+		}
+		b := bytes.NewBuffer(make([]byte,0))
+		bw := bufio.NewWriter(b)
+		_, err := p.WriteComment(bw, "#", properties.UTF8)
+		if err != nil {
+			return nil,ConfigMarshalError{err}
+		}
+		bw.Flush()
+		return b.Bytes(),nil
+
+	case "toml":
+		t := toml.TreeFromMap(c)
+		return []byte(t.String()),nil
+
+	case "yaml", "yml":
+		b, err := yaml.Marshal(c)
+		if err != nil {
+			return nil,ConfigMarshalError{err}
+		}
+		return b,nil
+	}
+	return nil,ConfigMarshalError{err:errors.New("Unsupport Config Type!")}
 }
 
 func keyExists(k string, m map[string]interface{}) string {
@@ -1707,6 +1775,7 @@ func (v *Viper) findConfigFile() (string, error) {
 func Debug() { v.Debug() }
 func (v *Viper) Debug() {
 	fmt.Printf("Aliases:\n%#v\n", v.aliases)
+	fmt.Printf("Type:\n%#v\n", v.getConfigType())
 	fmt.Printf("Override:\n%#v\n", v.override)
 	fmt.Printf("PFlags:\n%#v\n", v.pflags)
 	fmt.Printf("Env:\n%#v\n", v.env)
